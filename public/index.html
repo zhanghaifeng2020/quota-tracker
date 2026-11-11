@@ -1,0 +1,1421 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#172033">
+<title>额度与到期 · 订阅工作台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,560;12..96,720&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<div id="app"></div>
+
+<!-- 登录与注册弹窗 -->
+<div id="authModal" class="auth-overlay" hidden>
+  <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+    <div class="auth-header">
+      <div class="brand-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M4 18V9m8 9V4m8 14v-6M3 21h18"/></svg></div>
+      <h2 id="authTitle">额度与到期</h2>
+      <p>管理订阅，掌握每一次重置与到期。</p>
+    </div>
+    <div class="auth-tabs">
+      <button type="button" class="auth-tab active" id="tabLoginBtn" onclick="switchAuthTab('login')">登录</button>
+      <button type="button" class="auth-tab" id="tabRegisterBtn" onclick="switchAuthTab('register')">注册账号</button>
+    </div>
+    <div class="auth-body">
+      <div id="authAlert" class="auth-msg error" hidden></div>
+
+      <!-- 登录表单 -->
+      <form id="loginForm" class="auth-form" onsubmit="handleLogin(event)">
+        <div class="auth-field">
+          <label for="loginAccount">邮箱或用户名</label>
+          <input type="text" id="loginAccount" required placeholder="请输入您的邮箱或用户名" autocomplete="username">
+        </div>
+        <div class="auth-field">
+          <label for="loginPassword">密码</label>
+          <input type="password" id="loginPassword" required placeholder="请输入密码" autocomplete="current-password">
+        </div>
+        <button type="submit" class="auth-btn" id="loginSubmitBtn">登录</button>
+      </form>
+
+      <!-- 注册表单 -->
+      <form id="registerForm" class="auth-form" onsubmit="handleRegister(event)" hidden>
+        <div class="auth-field">
+          <label for="regUsername">用户名</label>
+          <input type="text" id="regUsername" required placeholder="你希望使用的名字（至少 2 位）" autocomplete="username">
+        </div>
+        <div class="auth-field">
+          <label for="regEmail">电子邮箱</label>
+          <input type="email" id="regEmail" required placeholder="例如：user@example.com" autocomplete="email">
+        </div>
+        <div class="auth-field">
+          <label for="regPassword">设置密码</label>
+          <input type="password" id="regPassword" required placeholder="至少 6 位字符" autocomplete="new-password">
+        </div>
+        <div class="auth-field">
+          <label for="regPasswordConfirm">确认密码</label>
+          <input type="password" id="regPasswordConfirm" required placeholder="再次输入密码" autocomplete="new-password">
+        </div>
+        <button type="submit" class="auth-btn" id="regSubmitBtn">创建账号</button>
+      </form>
+      <p class="auth-preview"><a href="/?preview=1">先看看示例工作台 →</a></p>
+    </div>
+  </div>
+</div>
+
+<!-- 用户登录与在线时长统计模态框 -->
+<div id="statsModal" class="stats-overlay" hidden>
+  <div class="stats-card" role="dialog" aria-modal="true" aria-labelledby="statsTitle">
+    <div class="stats-header">
+      <h3 id="statsTitle">登录与使用统计</h3>
+      <button type="button" class="stats-close" aria-label="关闭统计" onclick="closeStatsModal()">✕</button>
+    </div>
+    <div class="stats-body" id="statsContent">
+      <div style="text-align:center; padding:2rem; color:var(--muted);">正在加载统计数据...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const QUOTA_TOTAL = 100;
+const WEEK = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+const RAIL_DAYS = 17;
+
+// 全局应用状态
+const state = {
+  preview: new URLSearchParams(location.search).get("preview") === "1",
+  draftId: null,
+  user: null,         // 当前登录用户 { id, username, email }
+  token: null,        // JWT Token
+  sessionId: null,    // 当前会话 Session ID (用于时长追踪)
+  heartbeatTimer: null,
+  items: [],          // 当前用户的订阅项目列表
+  notices: [],
+  filter: null,
+  editing: null,
+  scrollEdit: false,
+  focusName: false,
+  armReset: false,
+  day: "",
+  syncStatus: "connected", // 'connected' | 'saving' | 'error'
+  syncText: "已连接",
+  sliderTimers: {}    // 存储每个项目的防抖更新计时器
+};
+
+function icon(name) {
+  const paths = {
+    brand: '<path d="M4 18V9m8 9V4m8 14v-6"/><path d="M3 21h18"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    calendar: '<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M7 3v4m10-4v4M3 11h18m-13 4h2m4 0h2"/>',
+    chevron: '<path d="m7 10 5 5 5-5"/>',
+    chart: '<path d="M4 20V4m0 16h16M9 16v-5m5 5V6m5 10v-8"/>',
+    logout: '<path d="M9 4H5v16h4m5-12 4 4-4 4m-5-4h12"/>',
+    refresh: '<path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 6a8 8 0 0 1 13 3M5 15a8 8 0 0 0 13 3"/>',
+    reset: '<path d="M4 4v6h6"/><path d="M5 9a8 8 0 1 1-1 7M12 8v5l3 2"/>',
+    more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+    check: '<path d="m5 12 4 4L19 6"/>',
+    close: '<path d="m6 6 12 12M6 18 18 6"/>'
+  };
+  return '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (paths[name] || paths.calendar) + '</svg>';
+}
+function discardDraft() {
+  if (state.draftId) state.items = state.items.filter(item => item.id !== state.draftId);
+  state.draftId = null;
+}
+function previewItems() {
+  const today = startOfDay(new Date());
+  const seeds = [
+    ['Muse', 0, 24, 'cycle'], ['codex', 0, 62, 'cycle'],
+    ['Cursor', 1, 82, 'cycle'], ['ChatGPT', 2, 18, 'once'],
+    ['Claude Code', 3, 46, 'cycle'], ['Grok.com', 4, 100, 'cycle'],
+    ['谷歌 AI', 5, 35, 'cycle'], ['谷歌 Flow', 6, 12, 'cycle'],
+    ['grok bot', 7, 68, 'cycle'], ['剪映积分', 10, 42, 'cycle'],
+    ['dmit', 12, 21, 'cycle'], ['Claude', 18, 0, 'once'], ['ChatGPT 备用', 25, 0, 'once']
+  ];
+  return seeds.map(([name, offset, used, kind], index) => normalize({
+    id: 'preview-' + index, name, kind, mode: 'interval', intervalDays: 30,
+    anchor: iso(addDays(today, offset)), due: iso(addDays(today, offset)),
+    quotaUsed: used, quotaEpoch: iso(today), quotaInitialized: true,
+    note: '示例记录，仅供界面预览', createdAt: 'preview'
+  }));
+}
+
+// ================= 日期与算法工具函数 (完整保留) =================
+function pad(n) { return String(n).padStart(2, "0"); }
+function iso(d) { return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()); }
+function parseISO(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || "");
+  if (!m) return null;
+  const y = Number(m[1]), mo = Number(m[2]), da = Number(m[3]);
+  const d = new Date(y, mo - 1, da);
+  if (d.getFullYear() !== y || d.getMonth() !== mo - 1 || d.getDate() !== da) return null;
+  return d;
+}
+function startOfDay(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+function addDays(d, n) { return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n); }
+function daysBetween(a, b) { return Math.round((startOfDay(b) - startOfDay(a)) / 86400000); }
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+function formatNum(n) {
+  const x = Math.round(Number(n) * 100) / 100;
+  return String(x);
+}
+function fmtShort(d, today) {
+  const base = (d.getMonth() + 1) + "月" + d.getDate() + "日";
+  if (today && d.getFullYear() !== startOfDay(today).getFullYear()) {
+    return d.getFullYear() + "年" + base;
+  }
+  return base;
+}
+function fmtLong(d) {
+  return d.getFullYear() + "年" + (d.getMonth() + 1) + "月" + d.getDate() + "日 " + WEEK[d.getDay()];
+}
+function formatClock(d) {
+  return d.getFullYear() + "年" + (d.getMonth() + 1) + "月" + d.getDate() + "日 " + WEEK[d.getDay()];
+}
+function uid() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+function normalize(item) {
+  const weekday = Number(item.weekday);
+  const monthDay = Number(item.monthDay);
+  const intervalDays = Number(item.intervalDays);
+  return {
+    id: item.id || uid(),
+    createdAt: item.createdAt || null,
+    name: item.name || "未命名",
+    kind: item.kind === "once" ? "once" : "cycle",
+    mode: item.mode === "weekday" || item.mode === "monthday" ? item.mode : "interval",
+    intervalDays: Number.isFinite(intervalDays) && intervalDays >= 1 ? Math.round(intervalDays) : 7,
+    weekday: Number.isInteger(weekday) && weekday >= 0 && weekday <= 6 ? weekday : 1,
+    monthDay: Number.isFinite(monthDay) ? Math.min(31, Math.max(1, Math.round(monthDay))) : 1,
+    anchor: item.anchor || item.due || iso(new Date()),
+    due: item.due || item.anchor || iso(new Date()),
+    note: item.note || "",
+    trackQuota: item.trackQuota !== false,
+    quotaLabel: item.quotaLabel || "额度",
+    quotaTotal: QUOTA_TOTAL,
+    quotaUsed: Math.max(0, Number(item.quotaUsed) || 0),
+    quotaEpoch: item.quotaEpoch || "",
+    quotaInitialized: Boolean(item.quotaInitialized)
+  };
+}
+
+function nextInterval(anchor, step, today) {
+  if (today <= anchor) return new Date(anchor.getTime());
+  const diff = daysBetween(anchor, today);
+  const mod = diff % step;
+  if (mod === 0) return new Date(today.getTime());
+  return addDays(today, step - mod);
+}
+function prevInterval(anchor, step, today) {
+  if (today < anchor) return null;
+  return addDays(today, -(daysBetween(anchor, today) % step));
+}
+function nextWeekday(anchor, weekday, today) {
+  const d = today < anchor ? anchor : today;
+  return addDays(d, (weekday - d.getDay() + 7) % 7);
+}
+function prevWeekday(anchor, weekday, today) {
+  if (today < anchor) return null;
+  const prev = addDays(today, -((today.getDay() - weekday + 7) % 7));
+  return prev < anchor ? null : prev;
+}
+function nextMonthDay(anchor, monthDay, today) {
+  let y = today.getFullYear(), m = today.getMonth();
+  if (today < anchor) { y = anchor.getFullYear(); m = anchor.getMonth(); }
+  for (let i = 0; i < 48; i++) {
+    const dim = new Date(y, m + 1, 0).getDate();
+    if (monthDay >= 1 && monthDay <= dim) {
+      const c = new Date(y, m, monthDay);
+      if (c >= anchor && c >= today) return c;
+    }
+    m += 1;
+    if (m > 11) { m = 0; y += 1; }
+  }
+  return null;
+}
+function prevMonthDay(anchor, monthDay, today) {
+  if (today < anchor) return null;
+  let y = today.getFullYear(), m = today.getMonth();
+  for (let i = 0; i < 48; i++) {
+    const dim = new Date(y, m + 1, 0).getDate();
+    if (monthDay >= 1 && monthDay <= dim) {
+      const c = new Date(y, m, monthDay);
+      if (c <= today && c >= anchor) return c;
+    }
+    m -= 1;
+    if (m < 0) { m = 11; y -= 1; }
+  }
+  return null;
+}
+function nextEvent(item, today) {
+  const t = startOfDay(today);
+  if (item.kind === "once") return parseISO(item.due);
+  const anchor = parseISO(item.anchor);
+  if (!anchor) return null;
+  if (item.mode === "weekday") return nextWeekday(anchor, Number(item.weekday), t);
+  if (item.mode === "monthday") return nextMonthDay(anchor, Number(item.monthDay), t);
+  return nextInterval(anchor, Math.max(1, Number(item.intervalDays) || 1), t);
+}
+function prevEvent(item, today) {
+  const t = startOfDay(today);
+  if (item.kind !== "cycle") return null;
+  const anchor = parseISO(item.anchor);
+  if (!anchor) return null;
+  if (item.mode === "weekday") return prevWeekday(anchor, Number(item.weekday), t);
+  if (item.mode === "monthday") return prevMonthDay(anchor, Number(item.monthDay), t);
+  return prevInterval(anchor, Math.max(1, Number(item.intervalDays) || 1), t);
+}
+function daysUntil(item, today) {
+  const n = nextEvent(item, today);
+  if (!n) return 9999;
+  return daysBetween(today, n);
+}
+function laterDates(item, today, count) {
+  if (item.kind !== "cycle") return [];
+  const first = nextEvent(item, today);
+  if (!first) return [];
+  const out = [];
+  let cursor = addDays(first, 1);
+  for (let i = 0; i < 40 && out.length < count; i++) {
+    const n = nextEvent(item, cursor);
+    if (!n || n.getTime() <= first.getTime()) break;
+    if (out.length && n.getTime() <= out[out.length - 1].getTime()) break;
+    out.push(n);
+    cursor = addDays(n, 1);
+  }
+  return out;
+}
+function ruleText(item) {
+  if (item.kind === "once") return "单次到期";
+  if (item.mode === "weekday") return "每" + WEEK[item.weekday] + "，从 " + item.anchor + " 起";
+  if (item.mode === "monthday") return "每月 " + item.monthDay + " 日，从 " + item.anchor + " 起；没有这一天就跳过";
+  return "每隔 " + item.intervalDays + " 天，从 " + item.anchor + " 起";
+}
+function changeHint(item) {
+  if (item.kind === "once") return "改了这一天，到期日就换成新日期。";
+  if (item.mode === "weekday") return "改了这一天，之后就改成每周的那一天，从新日期接着排。";
+  if (item.mode === "monthday") return "改了这一天，之后就改成每月的这一日，从新日期接着排。";
+  return "改了这一天，之后仍每隔 " + item.intervalDays + " 天，从新日期重新算。";
+}
+function followText(item, today) {
+  if (item.kind !== "cycle") return "";
+  const prev = prevEvent(item, today);
+  const next = nextEvent(item, today);
+  const later = laterDates(item, today, 3);
+  let start = "本轮尚未开始";
+  if (prev && next && iso(prev) === iso(startOfDay(today))) start = "本轮今天开始";
+  else if (prev) start = "本轮 " + fmtShort(prev, today) + " 开始";
+  else if (next) start = "从 " + fmtShort(next, today) + " 开始";
+  const tail = later.length ? "随后 " + later.map((d) => fmtShort(d, today)).join("、") : "";
+  return [start, ruleText(item), tail].filter(Boolean).join(" · ");
+}
+
+function classify(item, today) {
+  const used = Number(item.quotaUsed) || 0;
+  const days = daysUntil(item, today);
+  if (item.trackQuota && used >= QUOTA_TOTAL) return "empty";
+  if (item.kind === "once" && (days < 0 || days <= 21)) return "unused";
+  if (item.kind === "cycle" && days >= 0 && days <= 7) return "soon";
+  return "ok";
+}
+function matchesCategory(item, category, today) {
+  const days = daysUntil(item, today);
+  if (category === 'empty') return item.trackQuota && Number(item.quotaUsed) >= QUOTA_TOTAL;
+  if (category === 'soon') return item.kind === 'cycle' && days >= 0 && days <= 7;
+  if (category === 'unused') return item.kind === 'once' && days <= 21;
+  return classify(item, today) === category;
+}
+function counts(items, today) {
+  const c = { empty: 0, soon: 0, unused: 0, ok: 0 };
+  for (const key of Object.keys(c)) c[key] = items.filter(item => matchesCategory(item, key, today)).length;
+  return c;
+}
+function resetCadence(item) {
+  if (item.kind === "once") return "到期";
+  if (item.mode === "weekday") return "每" + WEEK[item.weekday] + "重置";
+  if (item.mode === "monthday") return "每月 " + item.monthDay + " 日重置";
+  return "每隔 " + item.intervalDays + " 天重置";
+}
+function remainInfo(item) {
+  const used = Number(item.quotaUsed) || 0;
+  const total = QUOTA_TOTAL;
+  if (!item.trackQuota) return { word: true, main: "—", sub: "" };
+  const left = Math.round((total - used) * 100) / 100;
+  if (left <= 0) return { word: false, main: "0", sub: "" };
+  return { word: false, main: formatNum(left), sub: "" };
+}
+function statusTag(item, today) {
+  const cls = classify(item, today);
+  const used = Number(item.quotaUsed) || 0;
+  const days = daysUntil(item, today);
+  if (cls === "empty") return "用光了";
+  if (cls === "unused") {
+    if (days < 0 && used === 0) return "已过期，还没用";
+    if (days < 0) return "已过期";
+    if (used === 0) return "快到期，还没用";
+    return "快到期";
+  }
+  if (cls === "soon") return days === 0 ? "今日重置" : "即将重置";
+  if (item.kind === "once" && used === 0) return "尚未使用";
+  return item.kind === "cycle" ? "循环订阅" : "单次订阅";
+}
+function datePhrase(item, today) {
+  const next = nextEvent(item, today);
+  if (!next) return { date: "日期未定", meta: "", cadence: "" };
+  const days = daysUntil(item, today);
+  const empty = classify(item, today) === "empty" && item.kind === "cycle";
+  let rel;
+  if (item.kind === "once" && days < 0) rel = "已过期 " + Math.abs(days) + " 天";
+  else if (days === 0) rel = empty ? "今天会再有" : "今天";
+  else if (days === 1) rel = empty ? "明天会再有" : "明天";
+  else rel = empty ? "还有 " + days + " 天会再有" : "还有 " + days + " 天";
+  return {
+    date: (next.getMonth() + 1) + "月" + next.getDate() + "日",
+    meta: WEEK[next.getDay()] + " · " + rel,
+    cadence: resetCadence(item)
+  };
+}
+function headline(items, today) {
+  const todayCount = items.filter(item => item.kind === 'cycle' && daysUntil(item, today) === 0).length;
+  const upcoming = items.filter(item => item.kind === 'cycle' && daysUntil(item, today) > 0 && daysUntil(item, today) <= 7).length;
+  if (!items.length) return '把订阅放在一起，额度与日程一目了然。';
+  return (todayCount ? '今天 ' + todayCount + ' 项重置' : '今天没有需要重置的订阅') + (upcoming ? ' · 未来 7 天还有 ' + upcoming + ' 项' : '');
+}
+
+function daysBlock(item, today) {
+  const days = daysUntil(item, today);
+  const kind = item.kind === "once" ? "到期" : "重置";
+  if (!nextEvent(item, today)) {
+    return { tone: "later", num: "未定", word: true, unit: kind };
+  }
+  if (days === 0) return { tone: "today", num: "今天", word: true, unit: kind };
+  if (days < 0) return { tone: "over", num: String(Math.abs(days)), word: false, unit: "天前" + kind };
+  return { tone: days <= 7 ? "soon" : "later", num: String(days), word: false, unit: "天后" + kind };
+}
+
+// 自动周期重置检查
+function applyResets(items, today, notices) {
+  const resetsToSync = [];
+  for (const item of items) {
+    if (item.kind !== "cycle" || item.trackQuota === false) continue;
+    const prev = prevEvent(item, today);
+    const key = prev ? iso(prev) : "";
+    if (!item.quotaInitialized) {
+      item.quotaInitialized = true;
+      item.quotaEpoch = key;
+      resetsToSync.push({ id: item.id, quotaUsed: item.quotaUsed, quotaEpoch: key });
+      continue;
+    }
+    if (key && key > (item.quotaEpoch || "")) {
+      const old = item.quotaUsed || 0;
+      item.quotaUsed = 0;
+      item.quotaEpoch = key;
+      resetsToSync.push({ id: item.id, quotaUsed: 0, quotaEpoch: key });
+      if (old > 0 && notices) {
+        notices.push(item.name + " 到了重置日，已用从 " + formatNum(old) + " 归零。");
+      }
+    }
+  }
+
+  // 批量异步回写 MySQL
+  if (resetsToSync.length > 0 && state.token) {
+    fetch('/api/subscriptions/batch-reset', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${state.token}`
+      },
+      body: JSON.stringify({ resets: resetsToSync })
+    }).catch(err => console.warn('批量重置同步失败:', err));
+  }
+}
+
+// ================= API 请求与云端同步 =================
+async function apiFetch(endpoint, options = {}) {
+  if (state.preview) throw new Error("当前为只读示例，请登录后管理你的订阅。");
+  const headers = options.headers || {};
+  if (state.token) {
+    headers['Authorization'] = `Bearer ${state.token}`;
+  }
+  if (options.body && typeof options.body === 'object' && !(options.body instanceof FormData)) {
+    headers['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(options.body);
+  }
+  options.headers = headers;
+
+  const res = await fetch(endpoint, options);
+  const data = await res.json();
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) {
+      logout();
+    }
+    throw new Error(res.status >= 500 ? '服务暂时不可用，请稍后重试。' : (data.message || '请求失败，请重试。'));
+  }
+  return data;
+}
+
+function setSyncStatus(status, text) {
+  state.syncStatus = status;
+  state.syncText = text;
+  const dot = document.querySelector('[data-sync-dot]');
+  const txt = document.querySelector('[data-sync-text]');
+  if (dot) {
+    dot.className = 'sync-dot' + (status === 'saving' ? ' saving' : status === 'error' ? ' error' : '');
+  }
+  if (txt) {
+    txt.textContent = text;
+  }
+}
+
+// 快速防抖同步额度滑块到 MySQL
+function syncQuotaDebounced(id, quotaUsed) {
+  setSyncStatus('saving', '保存额度...');
+  clearTimeout(state.sliderTimers[id]);
+  state.sliderTimers[id] = setTimeout(async () => {
+    try {
+      await apiFetch(`/api/subscriptions/${encodeURIComponent(id)}/quota`, {
+        method: 'PATCH',
+        body: { quotaUsed }
+      });
+      setSyncStatus('connected', '已同步');
+    } catch (err) {
+      setSyncStatus('error', '保存失败');
+      console.error(err);
+    }
+  }, 250);
+}
+
+// 卡片直接修改日期
+async function handleDateChange(id, dateStr) {
+  if (!dateStr) return;
+  setSyncStatus('saving', '保存日期...');
+  try {
+    const res = await apiFetch(`/api/subscriptions/${encodeURIComponent(id)}/date`, {
+      method: 'PATCH',
+      body: { dateStr }
+    });
+    // 更新本地内存对象
+    const idx = state.items.findIndex(it => it.id === id);
+    if (idx !== -1) {
+      state.items[idx] = res.data;
+    }
+    setSyncStatus('connected', '已同步');
+    render();
+  } catch (err) {
+    setSyncStatus('error', '保存失败');
+    alert('保存日期失败：' + err.message);
+  }
+}
+
+// 加载订阅数据
+async function loadSubscriptions() {
+  try {
+    setSyncStatus('saving', '拉取数据...');
+    const res = await apiFetch('/api/subscriptions');
+    state.items = res.data.map(normalize);
+    applyResets(state.items, new Date(), state.notices);
+    setSyncStatus('connected', '已同步');
+    render();
+  } catch (err) {
+    setSyncStatus('error', '读取失败');
+    console.error('加载订阅失败:', err);
+  }
+}
+
+// ================= 用户认证逻辑 =================
+function switchAuthTab(tab) {
+  const isLogin = tab === 'login';
+  document.getElementById('tabLoginBtn').classList.toggle('active', isLogin);
+  document.getElementById('tabRegisterBtn').classList.toggle('active', !isLogin);
+  document.getElementById('loginForm').hidden = !isLogin;
+  document.getElementById('registerForm').hidden = isLogin;
+  document.getElementById('authAlert').hidden = true;
+}
+
+function showAuthAlert(msg, type = 'error') {
+  const alertEl = document.getElementById('authAlert');
+  alertEl.textContent = msg;
+  alertEl.className = 'auth-msg ' + type;
+  alertEl.hidden = false;
+}
+
+async function handleLogin(e) {
+  e.preventDefault();
+  const account = document.getElementById('loginAccount').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  const btn = document.getElementById('loginSubmitBtn');
+  btn.disabled = true;
+  btn.textContent = '正在登录...';
+
+  try {
+    const res = await apiFetch('/api/auth/login', {
+      method: 'POST',
+      body: { account, password }
+    });
+
+    state.token = res.token;
+    state.user = res.user;
+    state.sessionId = res.sessionId;
+    localStorage.setItem('quota_tracker_token', res.token);
+    localStorage.setItem('quota_tracker_user', JSON.stringify(res.user));
+    sessionStorage.setItem('quota_session_id', res.sessionId);
+
+    startHeartbeat();
+    document.getElementById('authModal').hidden = true;
+    await loadSubscriptions();
+  } catch (err) {
+    showAuthAlert(err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '登录';
+  }
+}
+
+async function handleRegister(e) {
+  e.preventDefault();
+  const username = document.getElementById('regUsername').value.trim();
+  const email = document.getElementById('regEmail').value.trim();
+  const password = document.getElementById('regPassword').value;
+  const confirm = document.getElementById('regPasswordConfirm').value;
+  const btn = document.getElementById('regSubmitBtn');
+
+  if (password !== confirm) {
+    showAuthAlert('两次输入的密码不一致', 'error');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '正在创建账户并初始化表格...';
+
+  try {
+    const res = await apiFetch('/api/auth/register', {
+      method: 'POST',
+      body: { username, email, password }
+    });
+
+    state.token = res.token;
+    state.user = res.user;
+    state.sessionId = res.sessionId;
+    localStorage.setItem('quota_tracker_token', res.token);
+    localStorage.setItem('quota_tracker_user', JSON.stringify(res.user));
+    sessionStorage.setItem('quota_session_id', res.sessionId);
+
+    startHeartbeat();
+    document.getElementById('authModal').hidden = true;
+    await loadSubscriptions();
+  } catch (err) {
+    showAuthAlert(err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '创建账号';
+  }
+}
+
+function logout() {
+  if (state.sessionId) {
+    fetch('/api/auth/session-end', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: state.sessionId })
+    }).catch(() => {});
+  }
+  stopHeartbeat();
+  state.token = null;
+  state.user = null;
+  state.sessionId = null;
+  state.items = [];
+  state.filter = null;
+  state.editing = null;
+  state.draftId = null;
+  state.notices = [];
+  localStorage.removeItem('quota_tracker_token');
+  localStorage.removeItem('quota_tracker_user');
+  sessionStorage.removeItem('quota_session_id');
+  document.getElementById('authModal').hidden = false;
+  switchAuthTab('login');
+  render();
+}
+
+// ================= 卡片与视图 HTML 组装 =================
+function weekdayOptions(selected) {
+  const order = [1, 2, 3, 4, 5, 6, 0];
+  return order.map((d) => {
+    const on = d === selected ? " selected" : "";
+    return '<option value="' + d + '"' + on + ">" + WEEK[d] + "</option>";
+  }).join("");
+}
+
+function quotaHTML(item) {
+  if (!item.trackQuota) return '<div class="quota"><span class="row-meta">未记录用量</span></div>';
+  const used = Math.max(0, Math.min(QUOTA_TOTAL, Number(item.quotaUsed) || 0));
+  const pct = Math.round(used / QUOTA_TOTAL * 100);
+  return '<div class="quota"><label class="quota-slide" style="--pct:' + pct + '%">' +
+    '<span class="q-label">已用</span><span class="q-val mono" data-used-val>' + pct + '%</span>' +
+    '<input data-q="used" type="range" min="0" max="' + QUOTA_TOTAL + '" step="1" value="' + used + '" aria-label="' + esc(item.name + '已用额度') + '"' + (state.preview ? ' disabled' : '') + '></label></div>';
+}
+
+function editorHTML(item) {
+  const kind = item.kind;
+  return (
+    '<form class="editor" data-edit id="edit-' + esc(item.id) + '" data-id="' + esc(item.id) + '">' +
+      '<div class="editor-title"><h4>' + (state.preview ? '订阅规则' : '编辑订阅') + '</h4><span>' + (state.preview ? '示例规则，仅供查看' : '保存后立即生效') + '</span></div>' +
+      '<fieldset' + (state.preview ? ' disabled' : '') + '><div class="fields">' +
+        '<label class="field">名称 <input name="name" type="text" value="' + esc(item.name) + '" required autocomplete="off"></label>' +
+        '<label class="field">类型 <select name="kind">' +
+          '<option value="cycle"' + (kind === "cycle" ? " selected" : "") + ">循环</option>" +
+          '<option value="once"' + (kind === "once" ? " selected" : "") + ">单次到期</option>" +
+        "</select></label>" +
+      "</div>" +
+      '<div data-panel="cycle" style="margin-top:0.5rem">' +
+        '<div class="fields">' +
+          '<label class="field span2">周期起始日 <input name="anchor" type="date" value="' + esc(item.anchor) + '"></label>' +
+          '<label class="field">重置方式 <select name="mode">' +
+            '<option value="interval"' + (item.mode === "interval" ? " selected" : "") + ">固定天数</option>" +
+            '<option value="weekday"' + (item.mode === "weekday" ? " selected" : "") + ">每周固定日</option>" +
+            '<option value="monthday"' + (item.mode === "monthday" ? " selected" : "") + ">每月固定日</option>" +
+          "</select></label>" +
+          '<label class="field" data-mode="interval">间隔天数 <input name="intervalDays" type="number" min="1" step="1" value="' + esc(String(item.intervalDays)) + '"></label>' +
+          '<label class="field" data-mode="weekday">星期 <select name="weekday">' + weekdayOptions(item.weekday) + "</select></label>" +
+          '<label class="field" data-mode="monthday">每月几日 <input name="monthDay" type="number" min="1" max="31" step="1" value="' + esc(String(item.monthDay)) + '"></label>' +
+        "</div>" +
+        '<p class="hint" data-cycle-hint></p>' +
+      "</div>" +
+      '<div data-panel="once" style="margin-top:0.5rem">' +
+        '<label class="field">到期日 <input name="due" type="date" value="' + esc(item.due) + '"></label>' +
+        '<p class="hint">单次只认这一个日期。要续期，改到期日。</p>' +
+      "</div>" +
+      '<div class="fields" style="margin-top:0.5rem">' +
+        '<label class="field">额度名称 <input name="quotaLabel" type="text" value="' + esc(item.quotaLabel) + '"></label>' +
+        '<label class="check"><input name="trackQuota" type="checkbox"' + (item.trackQuota ? " checked" : "") + "> 记录额度</label>" +
+        '<label class="field span2">备注 <input name="note" type="text" value="' + esc(item.note) + '"></label>' +
+      "</div>" +
+      '</fieldset><p class="preview" data-preview></p>' +
+      '<p class="error" data-error hidden></p>' +
+      '<div class="actions">' +
+        (state.preview ? '' : '<button class="btn" type="submit">保存修改</button>') +
+        '<button class="btn ghost" type="button" data-cancel>' + (state.preview ? '收起' : '取消') + '</button>' +
+        (state.preview || state.draftId === item.id ? '' : '<button class="btn danger" type="button" data-delete>删除订阅</button>') +
+      "</div>" +
+    "</form>"
+  );
+}
+
+function cardHTML(item, today) {
+  const editing = state.editing === item.id;
+  const cls = classify(item, today);
+  const left = remainInfo(item);
+  const next = nextEvent(item, today);
+  const days = daysBlock(item, today);
+  const dateLabel = item.kind === 'once' ? '到期' : '重置';
+  const deadline = days.word ? days.num + dateLabel : days.num + days.unit;
+  const dateText = next ? fmtShort(next, today) + ' ' + WEEK[next.getDay()] : '日期未定';
+  const tone = days.tone === 'over' ? ' is-over' : days.tone === 'today' ? ' is-today' : '';
+  const mark = item.name.replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '').slice(0,2);
+  return `<article class="row is-${cls}${tone}${editing ? ' is-editing' : ''}" data-id="${esc(item.id)}">
+    <div class="row-main">
+      <div class="row-identity"><span class="service-mark" aria-hidden="true">${esc(mark)}</span><div class="row-name"><h3>${esc(item.name)}</h3><div class="row-sub"><span class="tag tag-${cls}" data-tag>${esc(statusTag(item,today))}</span></div></div></div>
+      <div class="row-left"><span class="kicker">剩余额度</span><div class="balance"><b class="num${left.word ? ' word' : ''}" data-left>${esc(left.main)}</b>${item.trackQuota ? '<small>/ 100</small>' : ''}</div></div>
+      ${quotaHTML(item)}
+      <div class="row-date"><button type="button" class="date-edit" data-edit-date aria-label="修改${esc(item.name + dateLabel)}日期" ${state.preview || editing ? 'disabled' : ''}>${icon('calendar')}<span><strong>${esc(deadline)}</strong><span>${esc(dateText)}</span></span></button><input type="date" data-field="next" value="${next ? iso(next) : ''}" aria-label="${esc(item.name + dateLabel)}日" hidden></div>
+      <div class="row-actions">${editing ? '' : '<button type="button" class="btn ghost small" data-open-edit aria-label="' + esc((state.preview ? '查看' : '编辑') + item.name) + '">' + (state.preview ? '查看' : '编辑') + '</button>'}</div>
+    </div>${editing ? editorHTML(item) : ''}</article>`;
+}
+
+const GROUP_META = {
+  empty: { title: "用光了", note: "额度没有了。右边的日期是下一次重置，到了那天会再有。" },
+  soon: { title: "7 天内重置", note: "这几天会重新给额度。日期就是几号会有。" },
+  unused: { title: "临近到期", note: "到期日近了，或者已经过了。已用还是 0 的，标成还没用。" },
+  ok: { title: "其他", note: "日期还早，或这轮额度还在。" }
+};
+
+function matchesFilter(item, today) {
+  if (!state.filter) return true;
+  if (GROUP_META[state.filter]) return matchesCategory(item, state.filter, today);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(state.filter)) {
+    const n = nextEvent(item, today);
+    return n && iso(n) === state.filter;
+  }
+  return true;
+}
+
+function sortByTimeLeft(items, today) {
+  return items.slice().sort((a, b) => {
+    const da = daysUntil(a, today);
+    const db = daysUntil(b, today);
+    if (da !== db) return da - db;
+    const qa = QUOTA_TOTAL - (Number(a.quotaUsed) || 0);
+    const qb = QUOTA_TOTAL - (Number(b.quotaUsed) || 0);
+    if (qa !== qb) return qa - qb;
+    return a.name.localeCompare(b.name, "zh");
+  });
+}
+
+function groupsOf(items, today) {
+  const sorted = sortByTimeLeft(items, today).filter((item) => matchesFilter(item, today));
+  if (state.filter && GROUP_META[state.filter]) {
+    return [{ id: state.filter, title: GROUP_META[state.filter].title, items: sorted }];
+  }
+  if (state.filter && /^\d{4}-\d{2}-\d{2}$/.test(state.filter)) {
+    const d = parseISO(state.filter);
+    return [{ id: "day", title: d ? fmtLong(d) : state.filter, items: sorted }];
+  }
+  return [{ id: "all", title: "按重置 / 到期还剩时间", items: sorted }];
+}
+
+function railHTML(items, today) {
+  const byDay = {};
+  for (const item of items) {
+    const n = nextEvent(item, today);
+    if (!n) continue;
+    const key = iso(n);
+    if (key < iso(today)) continue;
+    (byDay[key] || (byDay[key] = [])).push(item);
+  }
+  let html = "";
+  for (let i = 0; i < RAIL_DAYS; i++) {
+    const d = addDays(startOfDay(today), i);
+    const key = iso(d);
+    const hits = byDay[key] || [];
+    const dots = hits.map((item) => '<i class="dot ' + (item.kind === "once" ? "once" : "cycle") + '"></i>').join("");
+    const names = hits.length ? hits.map((item) => item.name).join("、") : "没有安排";
+    const pressed = state.filter === key ? "true" : "false";
+    html += '<button type="button" class="day' + (i === 0 ? " is-today" : "") + (state.filter === key ? " is-on" : "") + '" data-day="' + key + '" aria-pressed="' + pressed + '" aria-label="' + esc((d.getMonth() + 1) + "月" + d.getDate() + "日 " + WEEK[d.getDay()] + "，" + names) + '">' +
+      '<span class="day-week">' + (i === 0 ? "今天" : d.getDate() === 1 ? (d.getMonth() + 1) + "月" : WEEK[d.getDay()]) + "</span>" +
+      '<span class="day-num num">' + d.getDate() + "</span>" +
+      '<span class="dots">' + dots + "</span>" +
+    "</button>";
+  }
+  return html;
+}
+
+function chip(id, text, count) {
+  return '<button type="button" class="chip" data-filter="' + id + '" aria-pressed="' + ((state.filter || '') === id) + '">' + esc(text) + (count === undefined ? '' : '<b>' + count + '</b>') + '</button>';
+}
+
+function view(now) {
+  const items = state.items;
+  const c = counts(items, now);
+  const groups = groupsOf(items, now);
+  const filteredItems = groups.flatMap(group => group.items);
+  const activeTitle = state.filter ? groups[0].title : '';
+  const emptyText = state.filter === 'empty' ? '目前没有额度用尽的订阅' : state.filter === 'soon' ? '未来 7 天没有待重置的订阅' : state.filter === 'unused' ? '目前没有临近到期的订阅' : state.filter ? '这一天没有重置或到期安排' : '从第一项订阅开始';
+  const empty = `<div class="empty">${icon('calendar')}<h3>${emptyText}</h3><p>${state.filter ? '可以查看其他日期，或返回全部订阅。' : '添加你使用的服务，记录额度和下一次日期。'}</p>${state.filter ? chip('', '查看全部订阅') : '<button class="btn" data-add type="button">添加订阅</button>'}</div>`;
+  const notices = state.notices.length ? `<div class="notices"><details><summary>${icon('check')}<span>${state.notices.length} 项额度已自动重置<span class="notice-hint">查看明细</span></span></summary>${state.notices.map(n => '<p>' + esc(n) + '</p>').join('')}</details><button type="button" class="btn small" data-dismiss aria-label="关闭重置通知">${icon('close')}</button></div>` : '';
+  const sync = `<span class="sync-indicator"><span class="sync-dot${state.syncStatus === 'saving' ? ' saving' : state.syncStatus === 'error' ? ' error' : ''}" data-sync-dot></span><span data-sync-text>${esc(state.syncText)}</span></span>`;
+  const account = state.user ? `<div class="nav-right">${sync}<details class="account-menu"><summary aria-label="账号菜单"><span class="avatar">${esc(state.user.username.slice(0,1))}</span><span class="user-name">${esc(state.user.username)}</span>${icon('chevron')}</summary><div class="menu-popover"><div class="menu-user"><strong>${esc(state.user.username)}</strong><span>${esc(state.user.email)}</span></div><button type="button" onclick="openStatsModal()">${icon('chart')}登录与使用统计</button><button type="button" onclick="logout()">${icon('logout')}退出登录</button></div></details></div>` : state.preview ? '<div class="preview-nav"><span class="nav-preview">只读示例</span><a href="/">登录</a></div>' : '';
+  const tools = state.preview ? '' : `<details class="tools-menu"><summary class="btn ghost icon-only" aria-label="更多操作">${icon('more')}</summary><div class="menu-popover"><button type="button" data-reload>${icon('refresh')}刷新数据</button><button type="button" data-reset-default>${icon('reset')}恢复预设示例</button></div></details>`;
+  return `<header class="board"><div class="wrap head"><div class="brand"><span class="brand-mark" aria-hidden="true">${icon('brand')}</span><div><h1>额度与到期</h1><div class="brand-sub">订阅管理工作台</div></div></div>${account}</div></header>
+  <main class="sheet"><div class="wrap">
+    <section class="overview" aria-labelledby="overviewTitle"><div><p class="eyebrow" data-clock>${formatClock(now)}</p><h2 id="overviewTitle">订阅总览</h2><p class="lede">${esc(headline(items, now))}</p></div><div class="overview-actions">${state.preview ? '<a class="btn" href="/">' + icon('plus') + '<span>添加<span class="add-label-long">订阅</span></span></a>' : '<button type="button" class="btn" data-add>' + icon('plus') + '<span>添加<span class="add-label-long">订阅</span></span></button>'}${tools}</div></section>
+    <section class="calendar" aria-label="近期重置与到期日历"><div class="calendar-heading">${icon('calendar')}<h3>近期日程</h3><span class="calendar-range">${fmtShort(now)} — ${fmtShort(addDays(now,RAIL_DAYS - 1))}</span><div class="legend"><span><i></i>重置</span><span><i class="once"></i>到期</span></div></div><div class="rail">${railHTML(items,now)}</div><p class="rail-help">左右滑动查看日期 →</p></section>
+    <div class="sheet-bar"><div class="sheet-title"><h3>我的订阅</h3><span class="total-count mono">${items.length}</span></div><div class="chips" aria-label="订阅筛选">${chip('','全部')}${chip('soon','即将重置',c.soon)}${chip('unused','临近到期',c.unused)}${chip('empty','已用尽',c.empty)}</div></div>
+    ${notices}${activeTitle ? '<p class="filter-caption">' + esc(activeTitle) + ' · ' + filteredItems.length + ' 项</p>' : ''}
+    <div class="panel">${filteredItems.length ? '<div class="list-header" aria-hidden="true"><span>服务名称</span><span>剩余额度</span><span>本期用量</span><span>下次日程</span><span>操作</span></div><div class="list">' + filteredItems.map(item => cardHTML(item,now)).join('') + '</div>' : empty}</div>
+    <p class="foot"><span>${icon('check')}${state.preview ? '示例仅供预览，登录后可编辑和保存' : '额度调整自动保存，规则编辑后点击保存'}</span><span>按最近的重置与到期时间排序</span></p>
+  </div></main>`;
+}
+
+function render() {
+  const now = new Date();
+  state.day = iso(now);
+  const y = window.scrollY;
+  document.getElementById("app").innerHTML = view(now);
+  window.scrollTo(0, y);
+  document.getElementById('app').inert = !document.getElementById('authModal').hidden || !document.getElementById('statsModal').hidden;
+
+  document.querySelectorAll("form[data-edit]").forEach((form) => {
+    syncEditorVisibility(form);
+    refreshPreview(form);
+  });
+
+  if (state.scrollEdit && state.editing) {
+    state.scrollEdit = false;
+    document.getElementById("edit-" + state.editing)?.scrollIntoView({ block: "nearest" });
+  }
+  if (state.focusName) {
+    state.focusName = false;
+    const input = document.querySelector('form[data-edit] input[name="name"]');
+    if (input) { input.focus(); input.select(); }
+  }
+}
+
+// 表单可见性与实时预览控制
+function syncEditorVisibility(form) {
+  const kind = form.querySelector('[name="kind"]').value;
+  const cycle = form.querySelector('[data-panel="cycle"]');
+  const once = form.querySelector('[data-panel="once"]');
+  cycle.hidden = kind !== "cycle";
+  once.hidden = kind !== "once";
+  if (kind === "cycle") {
+    const mode = form.querySelector('[name="mode"]').value;
+    form.querySelectorAll("[data-mode]").forEach((el) => {
+      el.hidden = el.getAttribute("data-mode") !== mode;
+    });
+  }
+}
+
+function readEditor(form) {
+  const fd = new FormData(form);
+  return {
+    id: form.dataset.id,
+    name: (fd.get("name") || "").toString().trim() || "未命名",
+    kind: fd.get("kind") === "once" ? "once" : "cycle",
+    mode: (fd.get("mode") || "interval").toString(),
+    intervalDays: Number(fd.get("intervalDays")) || 7,
+    weekday: Number(fd.get("weekday")) ?? 1,
+    monthDay: Number(fd.get("monthDay")) || 1,
+    anchor: (fd.get("anchor") || "").toString(),
+    due: (fd.get("due") || "").toString(),
+    note: (fd.get("note") || "").toString(),
+    trackQuota: fd.get("trackQuota") !== null,
+    quotaLabel: (fd.get("quotaLabel") || "额度").toString()
+  };
+}
+
+function refreshPreview(form) {
+  const data = state.preview ? state.items.find(item => item.id === form.dataset.id) : readEditor(form);
+  const item = normalize(data);
+  const preview = form.querySelector("[data-preview]");
+  const hint = form.querySelector("[data-cycle-hint]");
+  if (hint) hint.textContent = changeHint(item);
+  if (preview) {
+    const today = new Date();
+    const next = nextEvent(item, today);
+    const dateStr = next ? (next.getMonth() + 1) + "月" + next.getDate() + "日 " + WEEK[next.getDay()] : "无法计算";
+    preview.textContent = "下一次：" + dateStr + " · " + (item.kind === "cycle" ? followText(item, today) : "单次到期");
+  }
+}
+
+// ================= 全局事件委托 =================
+document.addEventListener("input", (e) => {
+  // 额度滑块实时拖动交互
+  if (e.target.matches('[data-q="used"]')) {
+    const card = e.target.closest("[data-id]");
+    if (!card) return;
+    const item = state.items.find(it => it.id === card.dataset.id);
+    if (!item) return;
+
+    const val = Number(e.target.value);
+    item.quotaUsed = val;
+
+    // 实时更新卡片上的剩余数字和滑块显示
+    const pct = Math.round((val / QUOTA_TOTAL) * 100);
+    const slide = card.querySelector(".quota-slide");
+    const valEl = card.querySelector("[data-used-val]");
+    const leftEl = card.querySelector("[data-left]");
+    const tagEl = card.querySelector("[data-tag]");
+
+    if (slide) slide.style.setProperty("--pct", pct + "%");
+    if (valEl) valEl.textContent = pct + "%";
+    if (leftEl) {
+      const info = remainInfo(item);
+      leftEl.textContent = info.main;
+      leftEl.classList.toggle("word", !!info.word);
+    }
+    if (tagEl) {
+      tagEl.textContent = statusTag(item, new Date());
+      tagEl.className = "tag tag-" + classify(item, new Date());
+    }
+
+    card.classList.toggle('is-empty', classify(item, new Date()) === 'empty');
+    const liveCounts = counts(state.items, new Date());
+    document.querySelectorAll('.chip[data-filter] b').forEach(el => {
+      const key = el.closest('.chip').dataset.filter;
+      if (key in liveCounts) el.textContent = liveCounts[key];
+    });
+    // 防抖发送至 MySQL API
+    syncQuotaDebounced(item.id, val);
+    return;
+  }
+
+  // 编辑表单实时预览
+  const form = e.target.closest("form[data-edit]");
+  if (form) {
+    if (e.target.name === "kind" || e.target.name === "mode") {
+      syncEditorVisibility(form);
+    }
+    refreshPreview(form);
+  }
+});
+
+document.addEventListener("change", (e) => {
+  // 卡片上的日期选择器变更
+  if (e.target.matches('input[data-field="next"]')) {
+    const card = e.target.closest("[data-id]");
+    if (!card) return;
+    handleDateChange(card.dataset.id, e.target.value);
+  }
+});
+
+document.addEventListener("click", async (e) => {
+  const dateBtn = e.target.closest('[data-edit-date]');
+  if (dateBtn && !state.preview) {
+    const input = dateBtn.parentElement.querySelector('input[data-field="next"]');
+    dateBtn.hidden = true;
+    input.hidden = false;
+    input.focus();
+    try { input.showPicker?.(); } catch (_) {}
+    return;
+  }
+  // 过滤 Chip 按钮
+  const chipBtn = e.target.closest(".chip");
+  if (chipBtn) {
+    discardDraft();
+    state.editing = null;
+    state.filter = chipBtn.dataset.filter || null;
+    render();
+    return;
+  }
+
+  // 日历轨道上的日期
+  const dayBtn = e.target.closest(".day");
+  if (dayBtn) {
+    discardDraft();
+    state.editing = null;
+    const targetDay = dayBtn.dataset.day;
+    state.filter = state.filter === targetDay ? null : targetDay;
+    render();
+    return;
+  }
+
+  // 关闭通知
+  if (e.target.closest("[data-dismiss]")) {
+    state.notices = [];
+    render();
+    return;
+  }
+
+  // 加一项
+  if (e.target.closest("[data-add]")) {
+    if (state.preview) { location.href = "/"; return; }
+    discardDraft();
+    state.filter = null;
+    const newItem = normalize({
+      id: "item_" + uid(),
+      name: "新服务",
+      kind: "cycle",
+      mode: "interval",
+      intervalDays: 7,
+      anchor: iso(new Date()),
+      due: iso(new Date()),
+      trackQuota: true,
+      quotaUsed: 0
+    });
+    state.draftId = newItem.id;
+    state.items.unshift(newItem);
+    state.editing = newItem.id;
+    state.scrollEdit = true;
+    state.focusName = true;
+    render();
+    return;
+  }
+
+  // 刷新数据
+  if (e.target.closest("[data-reload]")) {
+    await loadSubscriptions();
+    return;
+  }
+
+  // 载入预设示例
+  if (e.target.closest("[data-reset-default]")) {
+    if (confirm("确定要恢复预设的 13 条示例数据吗？当前自定义数据将被覆盖。")) {
+      try {
+        setSyncStatus('saving', '重置中...');
+        const res = await apiFetch('/api/subscriptions/reset-default', { method: 'POST' });
+        state.items = res.data.map(normalize);
+        setSyncStatus('connected', '已同步');
+        render();
+      } catch (err) {
+        alert('重置失败：' + err.message);
+      }
+    }
+    return;
+  }
+
+  // 打开编辑
+  const openEditBtn = e.target.closest("[data-open-edit]");
+  if (openEditBtn) {
+    const card = openEditBtn.closest("[data-id]");
+    if (card) {
+      discardDraft();
+      state.editing = card.dataset.id;
+      render();
+    }
+    return;
+  }
+
+  // 取消编辑
+  if (e.target.closest("[data-cancel]")) {
+    discardDraft();
+    state.editing = null;
+    render();
+    return;
+  }
+
+  // 删除某项
+  const delBtn = e.target.closest("[data-delete]");
+  if (delBtn) {
+    const card = delBtn.closest("[data-id]");
+    if (!card) return;
+    const id = card.dataset.id;
+    const item = state.items.find(it => it.id === id);
+    if (!item) return;
+
+    if (confirm(`确定要删除工具「${item.name}」吗？删除后无法恢复。`)) {
+      try {
+        setSyncStatus('saving', '正在删除...');
+        await apiFetch(`/api/subscriptions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        state.items = state.items.filter(it => it.id !== id);
+        if (state.editing === id) state.editing = null;
+        setSyncStatus('connected', '已同步');
+        render();
+      } catch (err) {
+        alert('删除失败：' + err.message);
+      }
+    }
+    return;
+  }
+
+  // 快捷开启记额度
+  if (e.target.closest("[data-enable-quota]")) {
+    const card = e.target.closest("[data-id]");
+    if (!card) return;
+    const item = state.items.find(it => it.id === card.dataset.id);
+    if (!item) return;
+    item.trackQuota = true;
+    try {
+      await apiFetch(`/api/subscriptions/${encodeURIComponent(item.id)}`, {
+        method: 'PUT',
+        body: item
+      });
+      render();
+    } catch (err) {
+      alert('更新失败：' + err.message);
+    }
+    return;
+  }
+});
+
+document.addEventListener('click', e => {
+  document.querySelectorAll('.account-menu[open], .tools-menu[open]').forEach(menu => {
+    if (!menu.contains(e.target) || e.target.closest('button')) menu.open = false;
+  });
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    document.querySelectorAll('details[open]').forEach(menu => menu.open = false);
+    if (!document.getElementById('statsModal').hidden) closeStatsModal();
+    const input = document.activeElement;
+    if (input.matches?.('input[data-field="next"]')) input.blur();
+  }
+});
+document.addEventListener('focusout', e => {
+  if (e.target.matches('input[data-field="next"]')) {
+    e.target.hidden = true;
+    const button = e.target.parentElement.querySelector('[data-edit-date]');
+    if (button) button.hidden = false;
+  }
+});
+
+// 编辑表单提交 (保存修改)
+document.addEventListener("submit", async (e) => {
+  const form = e.target.closest("form[data-edit]");
+  if (!form) return;
+  e.preventDefault();
+  if (state.preview) return;
+
+  const id = form.dataset.id;
+  const current = state.items.find(it => it.id === id);
+  const formData = readEditor(form);
+
+  const updatedItem = {
+    ...current,
+    ...formData
+  };
+
+  const submitBtn = form.querySelector('button[type="submit"]');
+  submitBtn.disabled = true;
+  submitBtn.textContent = '保存中...';
+
+  try {
+    setSyncStatus('saving', '保存中...');
+    // 判断是新建还是更新
+    const isNew = !current || !current.createdAt;
+    let res;
+    if (isNew) {
+      res = await apiFetch('/api/subscriptions', {
+        method: 'POST',
+        body: updatedItem
+      });
+    } else {
+      res = await apiFetch(`/api/subscriptions/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        body: updatedItem
+      });
+    }
+
+    const idx = state.items.findIndex(it => it.id === id);
+    if (idx !== -1) {
+      state.items[idx] = normalize(res.data);
+    } else {
+      state.items.unshift(normalize(res.data));
+    }
+
+    state.editing = null;
+    state.draftId = null;
+    setSyncStatus('connected', '已同步');
+    render();
+  } catch (err) {
+    const errEl = form.querySelector("[data-error]");
+    if (errEl) {
+      errEl.textContent = "保存失败：" + err.message;
+      errEl.hidden = false;
+    } else {
+      alert("保存失败：" + err.message);
+    }
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = '保存修改';
+  }
+});
+
+// ================= 用户在线时长心跳与统计逻辑 =================
+function formatDuration(seconds) {
+  if (!seconds || seconds <= 0) return '刚刚';
+  if (seconds < 60) return seconds + ' 秒';
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m < 60) return m + ' 分 ' + (s > 0 ? s + ' 秒' : '');
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return h + ' 小时 ' + (remM > 0 ? remM + ' 分' : '');
+}
+
+function startHeartbeat() {
+  stopHeartbeat();
+  state.heartbeatTimer = setInterval(async () => {
+    if (!state.sessionId || !state.token) return;
+    try {
+      await fetch('/api/auth/heartbeat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${state.token}`
+        },
+        body: JSON.stringify({ sessionId: state.sessionId })
+      });
+    } catch (_) {}
+  }, 30000);
+}
+
+function stopHeartbeat() {
+  if (state.heartbeatTimer) {
+    clearInterval(state.heartbeatTimer);
+    state.heartbeatTimer = null;
+  }
+}
+
+async function initSession() {
+  if (!state.token) return;
+  try {
+    const res = await apiFetch('/api/auth/session-start', { method: 'POST' });
+    state.sessionId = res.sessionId;
+    sessionStorage.setItem('quota_session_id', res.sessionId);
+    startHeartbeat();
+  } catch (err) {
+    console.warn('会话初始化失败:', err);
+  }
+}
+
+window.addEventListener('beforeunload', () => {
+  if (state.sessionId) {
+    const payload = JSON.stringify({ sessionId: state.sessionId });
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon('/api/auth/session-end', payload);
+    } else {
+      fetch('/api/auth/session-end', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+        keepalive: true
+      });
+    }
+  }
+});
+
+function openStatsModal() {
+  document.querySelectorAll('details[open]').forEach(el => el.open = false);
+  document.getElementById('app').inert = true;
+  document.getElementById('statsModal').hidden = false;
+  document.querySelector('.stats-close').focus();
+  loadStatsData();
+}
+
+function closeStatsModal() {
+  document.getElementById('statsModal').hidden = true;
+  document.getElementById('app').inert = false;
+  document.querySelector('.account-menu > summary')?.focus();
+}
+
+async function loadStatsData() {
+  const contentEl = document.getElementById('statsContent');
+  contentEl.innerHTML = '<div style="text-align:center; padding:2rem; color:var(--muted);">正在加载使用统计…</div>';
+  try {
+    const res = await apiFetch('/api/stats/logins');
+    renderStatsView(res);
+  } catch (err) {
+    contentEl.innerHTML = '<div style="text-align:center; padding:2rem; color:var(--stamp);">获取统计失败：' + esc(err.message) + '</div>';
+  }
+}
+
+function renderStatsView(data) {
+  const contentEl = document.getElementById('statsContent');
+  const sum = data.summary || {};
+  const hourly = data.hourlyDistribution || [];
+  const logs = data.recentLogs || [];
+
+  const hourMap = {};
+  for (const h of hourly) hourMap[h.hour_of_day] = h.count;
+  const maxCount = Math.max(1, ...hourly.map(h => h.count));
+
+  let barsHTML = '';
+  for (let i = 0; i < 24; i++) {
+    const count = hourMap[i] || 0;
+    const pct = Math.round((count / maxCount) * 100);
+    barsHTML += '<div class="bar-col" title="' + i + ':00 点：登录 ' + count + ' 次">' +
+      '<div class="bar-pillar" style="height:' + Math.max(4, pct) + '%;' + (count > 0 ? 'background:#1f6f97' : 'background:#e2e8f0') + '"></div>' +
+      '<span class="bar-label">' + i + '</span>' +
+    '</div>';
+  }
+
+  let tableRowsHTML = '';
+  if (logs.length === 0) {
+    tableRowsHTML = '<tr><td colspan="6" style="text-align:center; padding:1.5rem; color:var(--muted);">暂无登录流水数据</td></tr>';
+  } else {
+    for (const log of logs) {
+      const isOnline = log.status === 'active';
+      const statusBadge = isOnline
+        ? '<span class="badge-status active">在线中</span>'
+        : log.status === 'logged_out'
+        ? '<span class="badge-status logged_out">已退出</span>'
+        : '<span class="badge-status timeout">已离线</span>';
+
+      const durText = isOnline
+        ? '<b style="color:var(--green)">' + formatDuration(log.duration_seconds) + ' (进行中)</b>'
+        : formatDuration(log.duration_seconds);
+
+      const device = (log.user_agent || '').includes('Macintosh') ? 'Mac' :
+                     (log.user_agent || '').includes('Windows') ? 'Windows' :
+                     (log.user_agent || '').includes('iPhone') ? 'iPhone' :
+                     (log.user_agent || '').includes('Android') ? 'Android' : '浏览器';
+
+      tableRowsHTML += '<tr>' +
+        '<td><b>' + esc(log.username || '未知') + '</b><div style="font-size:0.72rem;color:var(--muted)">' + esc(log.email || '') + '</div></td>' +
+        '<td class="mono" style="font-size:0.75rem">' + esc(log.login_time) + '</td>' +
+        '<td>' + durText + '</td>' +
+        '<td>' + statusBadge + '</td>' +
+        '<td class="mono" style="font-size:0.75rem">' + esc(log.ip_address || '127.0.0.1') + '</td>' +
+        '<td style="font-size:0.75rem">' + device + '</td>' +
+      '</tr>';
+    }
+  }
+
+  contentEl.innerHTML = (
+    '<div class="metric-grid">' +
+      '<div class="metric-card">' +
+        '<span class="label">累计登录人次</span>' +
+        '<span class="val num">' + (sum.total_logins || 0) + '</span>' +
+      '</div>' +
+      '<div class="metric-card">' +
+        '<span class="label">注册用户总数</span>' +
+        '<span class="val num">' + (sum.total_users || 0) + '</span>' +
+      '</div>' +
+      '<div class="metric-card">' +
+        '<span class="label">当前活跃在线</span>' +
+        '<span class="val num" style="color:var(--green)">' + (sum.online_now || 0) + '</span>' +
+      '</div>' +
+      '<div class="metric-card">' +
+        '<span class="label">平均在线停留时长</span>' +
+        '<span class="val num" style="font-size:1.25rem">' + formatDuration(sum.avg_duration) + '</span>' +
+      '</div>' +
+    '</div>' +
+    '<div class="chart-box">' +
+      '<h4>24 小时登录分布</h4>' +
+      '<div class="chart-bars">' + barsHTML + '</div>' +
+    '</div>' +
+    '<div class="logs-table-box">' +
+      '<table>' +
+        '<thead>' +
+          '<tr>' +
+            '<th>用户账号</th>' +
+            '<th>登录时间</th>' +
+            '<th>持续在线时长</th>' +
+            '<th>当前状态</th>' +
+            '<th>登录 IP</th>' +
+            '<th>客户端环境</th>' +
+          '</tr>' +
+        '</thead>' +
+        '<tbody>' + tableRowsHTML + '</tbody>' +
+      '</table>' +
+    '</div>'
+  );
+}
+
+// 每分钟刷新时钟与日期检查
+setInterval(() => {
+  const clockEl = document.querySelector("[data-clock]");
+  if (clockEl) clockEl.textContent = formatClock(new Date());
+
+  const todayStr = iso(new Date());
+  if (state.day && state.day !== todayStr) {
+    if (!state.preview) applyResets(state.items, new Date(), state.notices);
+    render();
+  }
+}, 60000);
+
+// ================= 应用初始化 =================
+async function initApp() {
+  if (state.preview) {
+    state.items = previewItems();
+    render();
+    return;
+  }
+  // 检测是否直接双击打开了本地 HTML 文件
+  if (window.location.protocol === 'file:') {
+    alert('【重要提示】您当前是通过本地文件形式直接双击打开的（file://）。\n\n请在浏览器地址栏输入并打开：\nhttp://localhost:3333\n\n这样才能正常连接后端服务与 MySQL 数据库！');
+    return;
+  }
+
+  const savedToken = localStorage.getItem('quota_tracker_token');
+  const savedUser = localStorage.getItem('quota_tracker_user');
+
+  if (savedToken && savedUser) {
+    state.token = savedToken;
+    try {
+      state.user = JSON.parse(savedUser);
+    } catch (_) {}
+    document.getElementById('authModal').hidden = true;
+    await initSession();
+    await loadSubscriptions();
+  } else {
+    // 未登录时显示模态框
+    document.getElementById('authModal').hidden = false;
+    switchAuthTab('login');
+    render();
+  }
+}
+
+initApp();
+</script>
+</body>
+</html>

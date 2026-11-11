@@ -1,0 +1,44 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: quota-mysql
+    restart: always
+    command: ['--default-time-zone=+08:00', '--character-set-server=utf8mb4', '--collation-server=utf8mb4_unicode_ci']
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-changeme}
+      MYSQL_DATABASE: ${DB_NAME:-quota_tracker}
+    ports:
+      - "127.0.0.1:3309:3306"
+    volumes:
+      - quota_mysql_data:/var/lib/mysql
+      - ./schema.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - quota-net
+
+  web:
+    build: .
+    container_name: quota-web
+    restart: always
+    depends_on:
+      - mysql
+    environment:
+      TZ: Asia/Shanghai
+      PORT: ${PORT:-3333}
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${DB_USER:-root}
+      DB_PASSWORD: ${DB_PASSWORD:-changeme}
+      DB_NAME: ${DB_NAME:-quota_tracker}
+      JWT_SECRET: ${JWT_SECRET:-change-this-to-a-long-random-secret}
+    ports:
+      - "0.0.0.0:3333:3333"
+    networks:
+      - quota-net
+
+volumes:
+  quota_mysql_data:
+
+networks:
+  quota-net:
+    driver: bridge

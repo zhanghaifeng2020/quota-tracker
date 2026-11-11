@@ -1,0 +1,10 @@
+node_modules
+.git
+.env
+.env.*
+.DS_Store
+*.log
+*.zip
+*.mp4
+quota_tracker_dump.sql
+backup_*.sql
